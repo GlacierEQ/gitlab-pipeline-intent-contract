@@ -1,0 +1,11 @@
+{
+  "schema": "glaciereq.promotion-authority-grant.v1",
+  "repository": "GlacierEQ/gitlab-pipeline-intent-contract",
+  "source_sha": "8323b1bd14af6254ac7ebc7e6e6e25ad0298dc4cf880836486db550849156104",
+  "proof_receipt_digest": "7986fd9cae4263ee4d37c041e545fbd73d97cc9fc961cca4965851f2fbe8a667",
+  "not_after": 1788948658.218139,
+  "mac": "4da6b0d8a250e3892470a7168f42b35bcf00f6f7802812c6e25e84ac3bf25f20",
+  "issuer": "local_operator_promotion_authority",
+  "verified": true,
+  "secret_ref": "src/promotion_authority.py::LOCAL_OPERATOR_SECRET"
+}
