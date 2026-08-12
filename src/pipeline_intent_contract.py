@@ -67,9 +67,7 @@ class PipelineIntentContract:
     INTENT_KEYS = frozenset(
         {"project_id", "allowed_environments", "read_paths", "write_paths", "allowed_secrets"}
     )
-    JOB_KEYS = frozenset(
-        {"job_id", "environment", "reads", "writes", "secrets"}
-    )
+    JOB_KEYS = frozenset({"job_id", "environment", "reads", "writes", "secrets"})
     MAX_JOBS = 256
     MAX_PATTERNS = 256
     MAX_SECRETS = 256
@@ -180,6 +178,29 @@ class PipelineIntentContract:
         return intent
 
     @classmethod
+    def _preflight_plan(cls, raw_plan: Any) -> tuple[int, int]:
+        """Count bounded plan work without normalizing every path/string."""
+        if not isinstance(raw_plan, list):
+            raise ValueError("execution_plan_missing")
+        if len(raw_plan) > cls.MAX_JOBS:
+            raise ValueError("execution_plan_over_limit")
+        item_count = 0
+        for index, raw in enumerate(raw_plan):
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"job_{index}_not_object")
+            unknown = set(raw) - cls.JOB_KEYS
+            if unknown:
+                raise ValueError(f"job_{index}_keys_unknown:" + ",".join(sorted(unknown)))
+            for field_name in ("reads", "writes", "secrets"):
+                items = raw.get(field_name, [])
+                if not isinstance(items, list):
+                    raise ValueError(f"job_{index}_{field_name}_invalid")
+                if len(items) > cls.MAX_ITEMS_PER_JOB:
+                    raise ValueError(f"job_{index}_{field_name}_over_limit")
+                item_count += len(items)
+        return len(raw_plan), item_count
+
+    @classmethod
     def _job(cls, raw: Any, index: int) -> dict[str, Any]:
         if not isinstance(raw, Mapping):
             raise ValueError(f"job_{index}_not_object")
@@ -273,6 +294,12 @@ class PipelineIntentContract:
         except ValueError as exc:
             budget = 0.0
             reasons.append(str(exc))
+        grant_reference: str | None = None
+        if req.grant_id is not None:
+            try:
+                grant_reference = self._text(req.grant_id, "grant_id")
+            except ValueError as exc:
+                reasons.append(str(exc))
         if not isinstance(req.payload, Mapping):
             payload: Mapping[str, Any] = {}
             reasons.append("payload_not_object")
@@ -314,23 +341,42 @@ class PipelineIntentContract:
                     reasons.append("expected_contract_digest_mismatch")
 
             if mode == "compile":
-                result = {"mode": mode, "contract": contract}
-            else:
-                jobs, violations, item_count = self.verify_plan(
-                    contract, payload.get("execution_plan")
-                )
-                work_units += (len(jobs) + item_count) * self.ITEM_WORK
-                if violations:
-                    reasons.append("pipeline_intent_drift")
                 result = {
                     "mode": mode,
+                    "grant_reference": grant_reference,
                     "contract": contract,
-                    "execution_plan": jobs,
-                    "execution_plan_digest": _digest(jobs),
-                    "violations": violations,
-                    "verified_job_count": len(jobs),
                 }
-            if work_units > budget:
+            else:
+                raw_plan = payload.get("execution_plan")
+                job_count, item_count = self._preflight_plan(raw_plan)
+                work_units += (job_count + item_count) * self.ITEM_WORK
+                if work_units > budget:
+                    reasons.append("work_budget_exceeded")
+                    result = {
+                        "mode": mode,
+                        "grant_reference": grant_reference,
+                        "contract": contract,
+                        "preflight_job_count": job_count,
+                        "preflight_item_count": item_count,
+                        "execution_plan": [],
+                        "violations": [],
+                    }
+                else:
+                    jobs, violations, normalized_item_count = self.verify_plan(contract, raw_plan)
+                    if normalized_item_count != item_count:
+                        raise ValueError("execution_plan_preflight_mismatch")
+                    if violations:
+                        reasons.append("pipeline_intent_drift")
+                    result = {
+                        "mode": mode,
+                        "grant_reference": grant_reference,
+                        "contract": contract,
+                        "execution_plan": jobs,
+                        "execution_plan_digest": _digest(jobs),
+                        "violations": violations,
+                        "verified_job_count": len(jobs),
+                    }
+            if mode == "compile" and work_units > budget:
                 reasons.append("work_budget_exceeded")
         except ValueError as exc:
             reasons.append(str(exc))
@@ -338,9 +384,12 @@ class PipelineIntentContract:
         decision = Decision.REFUSE if reasons else Decision.ALLOW
         if not reasons:
             reasons = [
-                "pipeline_intent_compiled" if result.get("mode") == "compile" else "pipeline_plan_matches_frozen_intent"
+                "pipeline_intent_compiled"
+                if result.get("mode") == "compile"
+                else "pipeline_plan_matches_frozen_intent"
             ]
         metrics = {
+            "grant_reference": grant_reference,
             "work_units": work_units,
             "budget_units": budget,
             "violation_count": len(result.get("violations", [])),
@@ -349,6 +398,7 @@ class PipelineIntentContract:
         digest = _digest(
             {
                 "subject_id": subject_id,
+                "grant_reference": grant_reference,
                 "decision": decision.value,
                 "reasons": reasons,
                 "result": result,
