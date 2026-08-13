@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 jobs:
-  pytest:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,5 +11,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - run: python -m pip install .
       - run: python -m pytest -q
       - run: python scripts/operate.py
+      - name: installed CLI matching plan
+        run: |
+          cat > /tmp/valid.json <<'JSON'
+          {"subject_id":"ci","budget":4.0,"payload":{"mode":"verify","intent":{"project_id":"glaciereq/app","allowed_environments":["test"],"read_paths":["src/**"],"write_paths":["reports/**"],"allowed_secrets":[]},"execution_plan":[{"job_id":"test","environment":"test","reads":["src/app.py"],"writes":["reports/junit.xml"],"secrets":[]}]}}
+          JSON
+          pipeline-intent-contract --input /tmp/valid.json > /tmp/valid.out
+          python -c 'import json; d=json.load(open("/tmp/valid.out")); assert d["decision"] == "ALLOW"; assert d["metrics"]["violation_count"] == 0'
+      - name: installed CLI drift refusal
+        run: |
+          cat > /tmp/drift.json <<'JSON'
+          {"subject_id":"ci","budget":4.0,"payload":{"mode":"verify","intent":{"project_id":"glaciereq/app","allowed_environments":["test"],"read_paths":["src/**"],"write_paths":["reports/**"],"allowed_secrets":[]},"execution_plan":[{"job_id":"test","environment":"production","reads":["private/customer.db"],"writes":["src/generated.py"],"secrets":["ROOT_TOKEN"]}]}}
+          JSON
+          if pipeline-intent-contract --input /tmp/drift.json > /tmp/drift.out; then exit 1; fi
+          python -c 'import json; d=json.load(open("/tmp/drift.out")); assert d["decision"] == "REFUSE"; assert "pipeline_intent_drift" in d["reasons"]; assert d["metrics"]["violation_count"] == 4'
